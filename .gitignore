@@ -22,6 +22,7 @@ DerivedData/
 *.perspectivev3
 !default.perspectivev3
 .swiftpm/xcode
+Package.resolved
 
 ## Obj-C/Swift specific
 *.hmap
