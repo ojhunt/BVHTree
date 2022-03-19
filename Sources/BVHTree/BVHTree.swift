@@ -13,7 +13,7 @@ public protocol Intersectable: AnyObject {
   var bounds: BoundingBox<PointType> { get }
 }
 
-public protocol IntConvertibleFloatingPoint: FloatingPoint {
+public protocol IntConvertibleFloatingPoint: FloatingPoint, ExpressibleByFloatLiteral {
   var asInteger: Int { get }
   init(_: Float)
   init(_: Double)
@@ -35,14 +35,58 @@ public struct Collision<ElementType: Intersectable> {
   
 }
 
+extension BoundingBox where PointType: Point, PointType.ValueType: IntConvertibleFloatingPoint, PointType.VectorType: Vector {
+  func offsetRatio(point: PointType, axis: PointType.AxisType) -> PointType.ValueType {
+    let o = point - minBound;
+    let scaleFactor = maxBound[axis] - minBound[axis];
+    return o[axis] / scaleFactor
+  }
+  
+  func surfaceArea() -> PointType.ValueType {
+    let size = maxBound - minBound;
+    var result = PointType.ValueType(1.0)
+    for axis in PointType.AxisType.allAxes {
+      result *= size[axis]
+    }
+    return result;
+  }
+  
+  @inline(__always) func intersect<RayType: Ray>(_ ray: RayType, min near: RayType.ValueType, max far: RayType.ValueType) -> (min: RayType.ValueType, max: RayType.ValueType)?
+  where RayType.PointType == PointType {
+    var tmin = PointType.VectorType(repeating: near);
+    var tmax = PointType.VectorType(repeating: far);
+
+    let direction = ray.direction;
+    let origin = ray.origin;
+
+    let inverseDir = PointType.VectorType(repeating: 1.0) ./ direction;
+    let unnormalizedT1 = (minBound - origin) .* inverseDir;
+    let unnormalizedT2 = (maxBound - origin) .* inverseDir;
+    let compareMask = unnormalizedT1 .> unnormalizedT2;
+    let t1 = unnormalizedT1.replace(with: unnormalizedT2, where: compareMask)
+    let t2 = unnormalizedT2.replace(with: unnormalizedT1, where: compareMask);
+    tmin = PointType.VectorType.max(tmin, t1);
+    tmax = PointType.VectorType.min(tmax, t2);
+    if (tmin .> tmax).any {
+      return nil;
+    }
+    return (tmin.maxElement(), tmax.minElement() + 0.01);
+  }
+}
+
 public protocol Ray {
   associatedtype PointType: Point
+  typealias ValueType = PointType.ValueType
   var direction: PointType.VectorType { get }
+  var origin: PointType { get }
+  
 }
 
 public protocol RenderContext {
   associatedtype ElementType: Intersectable
-  associatedtype PointType where PointType.ValueType: IntConvertibleFloatingPoint, PointType == ElementType.PointType
+  associatedtype PointType where PointType.ValueType: IntConvertibleFloatingPoint,
+                                 PointType == ElementType.PointType,
+                                 PointType.AxisType == ElementType.PointType.MaskType.AxisType
   typealias CollisionType = Collision<ElementType>
   associatedtype RayType: Ray where RayType.PointType == PointType
   var bvhStack : BVHTree<ElementType>.IntersectionContext { get set }
@@ -56,10 +100,11 @@ public enum HitMode {
 }
 
 public class BVHTree<Element: Intersectable>
-where Element.PointType.ValueType : IntConvertibleFloatingPoint&Numeric {
+where Element.PointType.ValueType : IntConvertibleFloatingPoint&Numeric,
+      Element.PointType.AxisType == Element.PointType.MaskType.AxisType {
   typealias PointType = Element.PointType
   typealias VectorType = Element.PointType.VectorType
-  typealias ValueType = Element.PointType.ValueType
+  public typealias ValueType = Element.PointType.ValueType
   typealias AxisType = Element.PointType.AxisType
   typealias BoundingBox = VectorTypes.BoundingBox<PointType>
   
@@ -214,7 +259,7 @@ where Element.PointType.ValueType : IntConvertibleFloatingPoint&Numeric {
         let leftCost : ValueType = buckets[i].leftInclusiveBounds.surfaceArea() / leafSurface * ValueType(buckets[i].leftInclusiveCount);
         let rightCost : ValueType =
           buckets[i].rightExclusiveBounds.surfaceArea() / leafSurface * ValueType(buckets[i].rightExclusiveCount);
-        buckets[i].splitCost = ValueType(1.0) + leftCost * ValueType(2.0) + rightCost * ValueType(2.0);
+        buckets[i].splitCost = 1.0 + leftCost * 2.0 + rightCost * 2.0;
       }
     }
     
@@ -248,8 +293,8 @@ where Element.PointType.ValueType : IntConvertibleFloatingPoint&Numeric {
     context: RenderContextType,
     ray: RenderContextType.RayType,
     hitMode: HitMode,
-    min: Float,
-    max: Float
+    min: ValueType,
+    max: ValueType
   ) -> RenderContextType.CollisionType?
   where RenderContextType.ElementType == Element {
     return intersect(context: context, ray, hitMode, min, max);
@@ -277,25 +322,14 @@ where Element.PointType.ValueType : IntConvertibleFloatingPoint&Numeric {
     }
   }
   
-  public typealias IntersectionContext = Stack<(Unmanaged<Node>, min: Float, max: Float)>
-  @inline(__always) fileprivate func valueAccessor(context: RenderContext,
-                                                   _ value: BVHTree.Node,
-                                                   ray: Ray,
-                                                   nodeMin: Float,
-                                                   nearest: inout Float,
-                                                   primitiveCount: inout Int,
-                                                   hitMode: HitMode,
-                                                   shouldContinue: inout Bool,
-                                                   result: inout Collision?) {
-    
-  }
+  public typealias IntersectionContext = Stack<(Unmanaged<Node>, min: ValueType, max: ValueType)>
 
   private func intersect<RenderContextType: RenderContext> (
     context: RenderContextType,
     _ ray: RenderContextType.RayType,
     _ hitMode: HitMode,
-    _ parentMin: Float,
-    _ parentMax: Float
+    _ parentMin: ValueType,
+    _ parentMax: ValueType
   ) -> RenderContextType.CollisionType?
   where RenderContextType.ElementType == Element {
     context.bvhStack.push((.passUnretained(root), parentMin, parentMax));
@@ -340,7 +374,7 @@ where Element.PointType.ValueType : IntConvertibleFloatingPoint&Numeric {
         continue
       }
       let (childMin, childMax) = boundsCollision;
-      if dirIsNegative[value._withUnsafeGuaranteedRef({$0.axis})] {
+      if dirIsNegative[value._withUnsafeGuaranteedRef({$0.axis!})] {
         context.bvhStack.push((value._withUnsafeGuaranteedRef({$0.children!.1}), childMin, childMax));
         context.bvhStack.push((value._withUnsafeGuaranteedRef({$0.children!.0}), childMin, childMax));
       } else {
