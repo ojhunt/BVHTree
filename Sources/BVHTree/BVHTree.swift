@@ -8,8 +8,20 @@
 import Foundation
 import VectorTypes
 
-public protocol Intersectable: AnyObject {
+public protocol Intersectable {
+  associatedtype PrimitiveType
+  func intersect<RenderContextType: RenderContext>(context: RenderContextType,
+                                                   ray: RenderContextType.RayType,
+                                                   hitMode: HitMode,
+                                                   min: RenderContextType.ValueType,
+                                                   max: RenderContextType.ValueType) -> RenderContextType.CollisionType?
+}
+public protocol BVHElement {
   associatedtype PointType: VectorTypes.Point where PointType.VectorType : VectorTypes.Vector
+  associatedtype LeafElementStorage: Intersectable
+  associatedtype PrimitiveType
+  static func buildLeafElements(_: [Self]) -> [LeafElementStorage]
+  static func releaseLeafElements(_: [LeafElementStorage])
   var bounds: BoundingBox<PointType> { get }
 }
 
@@ -31,8 +43,17 @@ extension Double: IntConvertibleFloatingPoint {
   }
 }
 
-public struct Collision<ElementType: Intersectable> {
-  
+public protocol Collision {
+  associatedtype ElementType: BVHElement
+  typealias ValueType = ElementType.PointType.ValueType
+  var distance: ValueType { get }
+  var target: ElementType.PrimitiveType { get }
+  var uv: (ValueType, ValueType) { get }
+  init(distance: ValueType,
+       uv: (ValueType, ValueType),
+       intersectionCount: Int,
+       nodeCount: Int,
+       target: ElementType.PrimitiveType);
 }
 
 extension BoundingBox where PointType: Point, PointType.ValueType: IntConvertibleFloatingPoint, PointType.VectorType: Vector {
@@ -83,12 +104,14 @@ public protocol Ray {
 }
 
 public protocol RenderContext {
-  associatedtype ElementType: Intersectable
+  associatedtype ElementType
   associatedtype PointType where PointType.ValueType: IntConvertibleFloatingPoint,
                                  PointType == ElementType.PointType,
                                  PointType.AxisType == ElementType.PointType.MaskType.AxisType
-  typealias CollisionType = Collision<ElementType>
+  associatedtype CollisionType : Collision where CollisionType.ElementType == ElementType
   associatedtype RayType: Ray where RayType.PointType == PointType
+  typealias VectorType = PointType.VectorType
+  typealias ValueType = PointType.ValueType
   var bvhStack : BVHTree<ElementType>.IntersectionContext { get set }
 }
 
@@ -99,7 +122,7 @@ public enum HitMode {
   case NearestHit
 }
 
-public class BVHTree<Element: Intersectable>
+public class BVHTree<Element: BVHElement>
 where Element.PointType.ValueType : IntConvertibleFloatingPoint&Numeric,
       Element.PointType.AxisType == Element.PointType.MaskType.AxisType {
   typealias PointType = Element.PointType
@@ -120,7 +143,7 @@ where Element.PointType.ValueType : IntConvertibleFloatingPoint&Numeric,
       self.children = (.passRetained(left), .passRetained(right))
       primitives = nil
     }
-    init(_ bounds: BoundingBox, _ primitives: [Unmanaged<Element>]) {
+    init(_ bounds: BoundingBox, _ primitives: [Element.LeafElementStorage]) {
       self.axis = nil
       self.bounds = bounds
       isLeaf = true
@@ -131,7 +154,7 @@ where Element.PointType.ValueType : IntConvertibleFloatingPoint&Numeric,
     let bounds: BoundingBox
     let axis: AxisType?
     let children: (Unmanaged<Node>, Unmanaged<Node>)?
-    let primitives: [Unmanaged<Element>]?
+    let primitives: [Element.LeafElementStorage]?
   }
   private struct PrimitiveInfo {
     let element: Element
@@ -163,27 +186,27 @@ where Element.PointType.ValueType : IntConvertibleFloatingPoint&Numeric,
   where T.Element == PrimitiveInfo
   {
     var bounds = BoundingBox()
-    var list = [Unmanaged<Element>]()
-    var triangles = [Triangle]()
+    var list = [Element]()
+//    var triangles = [Triangle]()
     for primitive in primitives {
       bounds = bounds.merge(other: primitive.bounds)
-      if let tri = primitive.element as? Triangle {
-        triangles.append(tri)
-        continue
-      }
-      list.append(.passUnretained(primitive.element))
+//      if let tri = primitive.element as? Triangle {
+//        triangles.append(tri)
+//        continue
+//      }
+      list.append(primitive.element)
     }
-    while triangles.count >= 4 {
-      list.append(.passRetained(TriangleBundle(triangles: triangles[0..<4].map({$0}))))
-      triangles.remove(at: 0)
-      triangles.remove(at: 0)
-      triangles.remove(at: 0)
-      triangles.remove(at: 0)
-    }
-    for t in triangles {
-      list.append(.passUnretained(t))
-    }
-    return Node(bounds, list)
+//    while triangles.count >= 4 {
+//      list.append(.passRetained(TriangleBundle(triangles: triangles[0..<4].map({$0}))))
+//      triangles.remove(at: 0)
+//      triangles.remove(at: 0)
+//      triangles.remove(at: 0)
+//      triangles.remove(at: 0)
+//    }
+//    for t in triangles {
+//      list.append(.passUnretained(t))
+//    }
+    return Node(bounds, Element.buildLeafElements(list))
   }
   private static func bucketForPrimitive(_ centroidBounds: BoundingBox,
                                          _ bucketCount: Int,
@@ -354,9 +377,7 @@ where Element.PointType.ValueType : IntConvertibleFloatingPoint&Numeric,
         primitiveCount += value._withUnsafeGuaranteedRef { $0.primitives!.count }
         for i in 0..<value._withUnsafeGuaranteedRef({ $0.primitives! }).count { // retain
           let primitive = value._withUnsafeGuaranteedRef({ $0.primitives![i] })
-          guard let collision = (primitive._withUnsafeGuaranteedRef {
-            $0.intersect(context: context, ray: ray, hitMode: hitMode, min: max(nodeMin, collisionBounds.min), max: min(nearest, collisionBounds.max))
-          }) else {
+          guard let collision = primitive.intersect(context: context, ray: ray, hitMode: hitMode, min: max(nodeMin, collisionBounds.min), max: min(nearest, collisionBounds.max)) else {
             continue
           }
           if collision.distance < nearest {
